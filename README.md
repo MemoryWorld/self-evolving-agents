@@ -26,6 +26,20 @@ What to evolve  ×  When to evolve  ×  How to evolve
 
 ---
 
+## Benchmark Results
+
+All examples verified with **DeepSeek-V3** (`deepseek-chat`) and **Qwen2.5-32B** (local, RTX 5090).
+
+| Example | Method | Success Rate | Notes |
+|---------|--------|-------------|-------|
+| 01 Basic Agent | Baseline | **100%** | 3/3 QA tasks |
+| 02 Memory Evolution | EpisodicMemory | **75%** | 3/4 tasks; memory distillation active |
+| 03 Reflexion | ReflexionAgent | **67–100%** | Verbal reflection on failure |
+| 04 Prompt Optimization | OPRO | **75%** | 3 iterations; prompt evolved |
+| 05 Tool Learning | ToolLearner | **100%** | `reverse_string`, `word_count` generated at runtime |
+
+---
+
 ## Installation
 
 ```bash
