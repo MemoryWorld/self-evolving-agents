@@ -1,0 +1,30 @@
+model:
+  primary: "deepseek/deepseek-chat"
+  weak: "deepseek/deepseek-chat"   # cheaper model for reflection/eval
+  temperature: 0.7
+  max_tokens: 4096
+
+agent:
+  max_steps: 20
+  max_retries: 3
+
+memory:
+  max_episodes: 100
+  similarity_threshold: 0.75
+  summarize_after: 10         # compress old episodes after N entries
+
+prompt_optimizer:
+  strategy: "opro"            # opro | textgrad
+  max_iterations: 5
+  batch_size: 4
+
+reflection:
+  strategy: "reflexion"       # reflexion | self_refine
+  max_reflection_rounds: 3
+
+evolution:
+  when: "inter_test"          # intra_test | inter_test | both
+  what: ["memory", "prompt"]  # memory | prompt | tools | model
+
+evaluation:
+  metrics: ["task_success", "evolution_gain", "stability"]
