@@ -88,7 +88,14 @@ class Trajectory:
 
     @property
     def total_reward(self) -> float:
-        rewards = [s.feedback.scalar for s in self.steps if s.feedback]
+        rewards = []
+        for step in self.steps:
+            if step.feedback is None:
+                continue
+            try:
+                rewards.append(step.feedback.scalar)
+            except ValueError:
+                continue
         return sum(rewards)
 
 

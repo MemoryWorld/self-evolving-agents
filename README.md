@@ -1,44 +1,184 @@
 # Self-Evolving Agents Framework
 
-A modular Python framework for building and experimenting with **self-evolving LLM agents** — agents that continuously improve through memory, reflection, prompt optimisation, and tool learning.
+A modular Python framework for building and experimenting with self-evolving LLM agents.
 
-> Built on top of two comprehensive surveys:
-> - [A Survey of Self-Evolving Agents: On Path to ASI](https://arxiv.org/abs/2507.21046) (arXiv:2507.21046)
-> - [A Comprehensive Survey of Self-Evolving AI Agents](https://arxiv.org/abs/2508.07407) (arXiv:2508.07407)
+This project started as a research-oriented implementation of ideas from self-evolving agent surveys. It has now been reframed as an engineering-focused agent platform roadmap: a system that can run agents, log trajectories, evolve prompts and memory, learn tools, and grow toward a serviceable benchmarkable platform.
 
----
+## What It Does Today
 
-## Framework Overview
+The current codebase already supports:
 
+- a reusable `BaseAgent` execution loop
+- pluggable environments
+- episodic memory with distilled lessons
+- vector-based episodic memory retrieval with a local embedder fallback
+- SQLite persistence for runs, steps, and memory
+- a FastAPI service layer for executing and inspecting runs
+- prompt optimization with an OPRO-style loop
+- verbal reflection with retry
+- runtime tool generation and registration
+- LLM-as-judge reward scoring
+- evaluation metrics and basic unit tests
+
+In practical terms, the repo is already a working prototype for:
+
+- running small agent tasks
+- recording trajectories
+- trying different evolution mechanisms
+- comparing simple behaviors across tasks
+
+It is not yet a production system, training framework, or distributed runtime.
+
+## Current Architecture
+
+```text
+src/self_evolving/
+├── core/
+│   ├── agent.py
+│   ├── environment.py
+│   └── types.py
+├── evolution/
+│   ├── memory/episodic.py
+│   ├── prompt/opro.py
+│   └── tools/learner.py
+├── mechanisms/
+│   ├── reflection/
+│   │   ├── base.py
+│   │   ├── reflexion.py
+│   │   └── self_refine.py
+│   └── reward/scorer.py
+└── evaluation/metrics.py
 ```
-What to evolve  ×  When to evolve  ×  How to evolve
-     (§3)               (§4)               (§5)
-```
 
-| Module | Covers | Methods |
-|--------|--------|---------|
-| `evolution/memory` | Memory evolution | Expel, MemGPT-style episodic memory |
-| `evolution/prompt` | Prompt optimisation | OPRO |
-| `evolution/tools`  | Tool learning | LATM, CREATOR |
-| `mechanisms/reflection` | Intra/inter-test reflection | Reflexion, Self-Refine |
-| `mechanisms/reward` | Scalar reward generation | LLM-as-judge |
-| `evaluation` | Evolution metrics | Success rate, evolution gain, stability |
+## Module Summary
 
----
+### Core agent
+- `src/self_evolving/core/agent.py`
+- Handles the main loop:
+  - reset environment
+  - generate action
+  - receive feedback
+  - record trajectory
+  - optionally use memory and reflection
 
-## Benchmark Results
+### Environments
+- `src/self_evolving/core/environment.py`
+- Includes:
+  - `SimpleQAEnvironment`
+  - `ToolUseEnvironment`
 
-All examples verified with **DeepSeek-V3** (`deepseek-chat`) and **Qwen2.5-32B** (local, RTX 5090).
+### Episodic memory
+- `src/self_evolving/evolution/memory/episodic.py`
+- Stores lessons distilled from past trajectories.
+- Retrieval now uses vector similarity as the primary score.
+- Default setup uses a lightweight local hashing embedder so the project works without extra model downloads.
+- The embedder backend is pluggable, so this can later be swapped to `sentence-transformers` or an external embedding model.
 
-| Example | Method | Success Rate | Notes |
-|---------|--------|-------------|-------|
-| 01 Basic Agent | Baseline | **100%** | 3/3 QA tasks |
-| 02 Memory Evolution | EpisodicMemory | **75%** | 3/4 tasks; memory distillation active |
-| 03 Reflexion | ReflexionAgent | **67–100%** | Verbal reflection on failure |
-| 04 Prompt Optimization | OPRO | **75%** | 3 iterations; prompt evolved |
-| 05 Tool Learning | ToolLearner | **100%** | `reverse_string`, `word_count` generated at runtime |
+### Embedders
+- `src/self_evolving/evolution/memory/embedders.py`
+- Includes:
+  - `HashingEmbedder` for zero-extra-dependency local vector retrieval
+  - `SentenceTransformerEmbedder` as an optional stronger local backend
 
----
+### Persistence
+- `src/self_evolving/persistence/sqlite_store.py`
+- Persists:
+  - runs
+  - steps
+  - episodic memory entries
+
+### API service
+- `src/self_evolving/service/api.py`
+- Exposes endpoints for:
+  - health
+  - run QA task
+  - list runs
+  - inspect run detail
+  - inspect agent memory
+
+### Prompt evolution
+- `src/self_evolving/evolution/prompt/opro.py`
+- Maintains prompt history and uses a meta-LLM to propose better prompts.
+
+### Tool learning
+- `src/self_evolving/evolution/tools/learner.py`
+- Generates Python tool functions with the LLM, validates them, and registers them for reuse.
+
+### Reflection
+- `src/self_evolving/mechanisms/reflection/reflexion.py`
+- Adds post-failure reflection and retry behavior.
+
+### Reward scoring
+- `src/self_evolving/mechanisms/reward/scorer.py`
+- Uses an LLM judge to turn outcomes into scalar rewards.
+
+### Evaluation
+- `src/self_evolving/evaluation/metrics.py`
+- Tracks:
+  - success rate
+  - evolution gain
+  - stability
+  - adaptation speed
+
+## What This Repo Is Right Now
+
+This repository is best described as:
+
+"A working single-process LLM agent experimentation framework with memory, prompt evolution, reflection, tool learning, and evaluation."
+
+That is strong enough for:
+
+- research prototyping
+- portfolio demonstration
+- algorithmic experimentation
+- framework design discussions
+
+That is not yet enough for:
+
+- production serving
+- API deployment
+- persistent run management
+- serious benchmarking
+- secure tool execution
+- distributed execution
+
+## Major Gaps
+
+### Engineering gaps
+- no dashboard
+- no benchmark automation
+- no container delivery files
+- no CI workflow
+
+### Systems / platform gaps
+- no safe tool sandbox
+- no multi-agent orchestration runtime
+- no experiment artifact store
+- no observability / tracing layer
+
+### Intentionally out of scope for now
+- multi-GPU execution
+- distributed runtime
+- LoRA / finetuning loop integration
+
+Those can be added later, but the current focus is to make the repo excellent within a single-machine engineering scope first.
+
+## Priority Roadmap
+
+The immediate upgrade path is:
+
+1. add stronger tests and config loading
+2. add persistence for runs, memory, prompts, and tools
+3. upgrade memory from keyword retrieval to vector retrieval
+4. add a benchmark runner
+5. harden the FastAPI service and add async job execution
+6. add a safer tool sandbox
+7. add a lightweight dashboard
+8. add Docker and CI
+
+The detailed execution breakdown is in:
+
+- [TASKS.md](./TASKS.md)
 
 ## Installation
 
@@ -48,10 +188,8 @@ cd self-evolving-agents
 pip install -e ".[dev]"
 
 cp .env.example .env
-# Edit .env and set your API key (DeepSeek, OpenAI, etc.)
+# Edit .env and set your API key
 ```
-
----
 
 ## Quick Start
 
@@ -61,101 +199,73 @@ load_dotenv()
 
 from self_evolving.core.agent import BaseAgent
 from self_evolving.core.environment import SimpleQAEnvironment
-from self_evolving.evolution.memory.episodic import EpisodicMemory
 
-# Build agent with episodic memory
 agent = BaseAgent()
-agent.memory = EpisodicMemory()
-
 env = SimpleQAEnvironment([("What is the capital of France?", "Paris")])
+
 trajectory = agent.run(env, goal="What is the capital of France?")
 print("Success:", trajectory.success)
 ```
 
----
+## API Quick Start
+
+Run the API:
+
+```bash
+uvicorn self_evolving.service.api:create_app --factory --reload
+```
+
+Create a persisted QA run:
+
+```bash
+curl -X POST http://127.0.0.1:8000/runs/qa \
+  -H "Content-Type: application/json" \
+  -d '{
+    "goal": "What is the capital of France?",
+    "reference_answer": "Paris",
+    "agent_id": "demo-agent",
+    "use_memory": true
+  }'
+```
+
+Inspect stored runs:
+
+```bash
+curl http://127.0.0.1:8000/runs
+```
+
+Inspect stored memory for one agent:
+
+```bash
+curl http://127.0.0.1:8000/agents/demo-agent/memory
+```
 
 ## Examples
 
-| File | Demonstrates |
-|------|-------------|
-| `examples/01_basic_agent.py` | Plain agent on QA tasks |
-| `examples/02_memory_evolution.py` | Episodic memory across tasks |
-| `examples/03_reflexion.py` | Verbal reflection on failure + retry |
-| `examples/04_prompt_optimization.py` | OPRO prompt evolution |
-| `examples/05_tool_learning.py` | Runtime tool creation (LATM/CREATOR) |
-
-Run any example:
+### 1. Basic agent
 ```bash
 python examples/01_basic_agent.py
 ```
 
----
-
-## Architecture
-
-```
-src/self_evolving/
-├── core/
-│   ├── agent.py          # BaseAgent — Π = (Γ, {ψi}, {Ci}, {Wi})
-│   ├── environment.py    # POMDP environment interface + QA / tool-use envs
-│   └── types.py          # Trajectory, Feedback, EvolutionRecord, ...
-├── evolution/
-│   ├── memory/
-│   │   └── episodic.py   # EpisodicMemory — distil & retrieve past experiences
-│   ├── prompt/
-│   │   └── opro.py       # OPROOptimizer — LLM-as-optimiser for system prompts
-│   └── tools/
-│       └── learner.py    # ToolLearner — generate & register Python tools
-├── mechanisms/
-│   ├── reflection/
-│   │   ├── reflexion.py  # ReflexionReflector + ReflexionAgent
-│   │   └── self_refine.py# SelfRefineReflector — intra-episode critique+refine
-│   └── reward/
-│       └── scorer.py     # RewardScorer — LLM-as-judge scalar rewards
-└── evaluation/
-    └── metrics.py        # EvolutionMetrics — success rate, gain, stability
+### 2. Memory evolution
+```bash
+python examples/02_memory_evolution.py
 ```
 
----
-
-## Evolution Taxonomy
-
-Following the surveys' three-dimensional taxonomy:
-
-### What to evolve (§3)
-- **Memory** — episodic storage of distilled lessons (`EpisodicMemory`)
-- **Prompt** — automatic system prompt improvement (`OPROOptimizer`)
-- **Tools** — runtime generation of reusable Python callables (`ToolLearner`)
-
-### When to evolve (§4)
-- **Intra-test-time** — within a single episode (`SelfRefineReflector`)
-- **Inter-test-time** — across episodes (`EpisodicMemory`, `OPROOptimizer`, `ReflexionAgent`)
-
-### How to evolve (§5)
-- **Reward-based** — scalar reward signals (`RewardScorer`)
-- **Imitation / Demonstration** — learn from past trajectories (`EpisodicMemory`)
-- **Textual feedback** — verbal critiques (`ReflexionReflector`, `SelfRefineReflector`)
-
----
-
-## Configuration
-
-Edit `configs/default.yaml` or set environment variables in `.env`:
-
-```yaml
-model:
-  primary: "deepseek/deepseek-chat"
-
-evolution:
-  when: "inter_test"
-  what: ["memory", "prompt"]
-
-reflection:
-  strategy: "reflexion"
-  max_reflection_rounds: 3
+### 3. Reflexion retry
+```bash
+python examples/03_reflexion.py
 ```
 
----
+### 4. Prompt optimization
+```bash
+python examples/04_prompt_optimization.py
+```
+
+### 5. Tool learning
+```bash
+python examples/05_tool_learning.py
+```
 
 ## Tests
 
@@ -163,37 +273,15 @@ reflection:
 pytest tests/ -v
 ```
 
----
+## Project Direction
 
-## Roadmap
+The target outcome for this repo is no longer just:
 
-- [ ] Multi-agent evolution (population-based, co-evolution)
-- [ ] TextGrad-style gradient-based prompt optimisation
-- [ ] Benchmark harnesses (HotpotQA, ALFWorld, WebArena)
-- [ ] Vector-store backed memory (FAISS / LanceDB)
-- [ ] Fine-tuning loop integration (LoRA adapter evolution)
+"Implement the survey ideas."
 
----
+The target outcome is:
 
-## Citation
-
-```bibtex
-@article{gao2025survey,
-  title={A Survey of Self-Evolving Agents: On Path to Artificial Super Intelligence},
-  author={Gao, Huan-ang and others},
-  journal={arXiv:2507.21046},
-  year={2025}
-}
-
-@article{fang2025comprehensive,
-  title={A Comprehensive Survey of Self-Evolving AI Agents},
-  author={Fang, Jinyuan and others},
-  journal={arXiv:2508.07407},
-  year={2025}
-}
-```
-
----
+"Turn self-evolving agents into a portfolio-grade LLM systems project with persistent experiments, semantic memory, benchmark automation, API serving, safer tool execution, and engineering-grade delivery."
 
 ## License
 

@@ -22,6 +22,7 @@ from self_evolving.core.environment import Environment
 if TYPE_CHECKING:
     from self_evolving.evolution.memory.episodic import EpisodicMemory
     from self_evolving.mechanisms.reflection.base import BaseReflector
+    from self_evolving.persistence.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class BaseAgent:
         # Optional pluggable modules (set after construction)
         self.memory: Optional[EpisodicMemory] = None
         self.reflector: Optional[BaseReflector] = None
+        self.store: Optional[SQLiteStore] = None
 
         self._conversation: list[Message] = []
         self._current_trajectory: Optional[Trajectory] = None
@@ -103,7 +105,16 @@ class BaseAgent:
 
         # Store episode in memory
         if self.memory:
-            self.memory.store(trajectory)
+            memory_entries = self.memory.store(trajectory)
+            if self.store:
+                self.store.save_memory_entries(self.agent_id, memory_entries)
+
+        if self.store:
+            trajectory.metadata["run_id"] = self.store.save_trajectory(
+                agent=self,
+                env_name=env.name,
+                trajectory=trajectory,
+            )
 
         return trajectory
 
