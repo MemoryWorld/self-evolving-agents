@@ -15,6 +15,7 @@ The current codebase already supports:
 - SQLite persistence for runs, steps, and memory
 - a FastAPI service layer for executing and inspecting runs
 - a benchmark runner that compares agent variants and writes JSON artifacts
+- a Streamlit dashboard for runs, memory, and benchmark artifacts
 - prompt optimization with an OPRO-style loop
 - verbal reflection with retry
 - runtime tool generation and registration
@@ -129,6 +130,15 @@ src/self_evolving/
   - reflexion
   - prompt optimization
 - Writes JSON artifacts for each variant plus a session summary.
+
+### Dashboard
+- `app.py`
+- `src/self_evolving/dashboard/data.py`
+- Shows:
+  - recent runs
+  - run detail
+  - agent memory
+  - benchmark sessions and per-variant artifacts
 
 ## What This Repo Is Right Now
 
@@ -280,6 +290,11 @@ python examples/05_tool_learning.py
 ### 6. Benchmark runner
 ```bash
 python examples/06_benchmark_runner.py
+```
+
+### 7. Dashboard
+```bash
+streamlit run app.py
 ```
 
 ## Tests

@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
+    "streamlit>=1.40.0",
 ]
 
 [project.optional-dependencies]
