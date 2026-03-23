@@ -297,6 +297,33 @@ python examples/06_benchmark_runner.py
 streamlit run app.py
 ```
 
+### 8. Generate offline demo data
+```bash
+python examples/07_generate_demo_data.py
+```
+
+This populates:
+- SQLite runs
+- agent memory entries
+- benchmark JSON artifacts
+
+Use it when you want the dashboard to have data immediately without calling a real external model.
+
+## Next Step
+
+The next practical step after the current dashboard is:
+
+- connect the dashboard to live API-triggered execution
+
+That would let the UI:
+- submit a new task
+- persist the run
+- refresh run history
+- refresh memory
+- refresh benchmark artifacts after execution
+
+In other words, the next upgrade is turning the dashboard from a viewer into a lightweight control plane.
+
 ## Tests
 
 ```bash
