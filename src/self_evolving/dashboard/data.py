@@ -51,3 +51,38 @@ def load_benchmark_variant(session_dir: str, variant: str) -> dict[str, Any] | N
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+
+def build_benchmark_comparison(session: dict[str, Any]) -> list[dict[str, Any]]:
+    variants = session.get("variants", {})
+    rows = []
+    for name, payload in variants.items():
+        rows.append(
+            {
+                "variant": name,
+                "success_rate": payload.get("success_rate", 0.0),
+                "mean_reward": payload.get("mean_reward", 0.0),
+                "mean_steps": payload.get("mean_steps", 0.0),
+                "evolution_gain": payload.get("evolution_gain"),
+                "stability": payload.get("stability", 0.0),
+            }
+        )
+    return rows
+
+
+def summarize_memory(memories: list[dict[str, Any]]) -> dict[str, Any]:
+    if not memories:
+        return {
+            "total_entries": 0,
+            "avg_importance": 0.0,
+            "total_accesses": 0,
+        }
+
+    total_entries = len(memories)
+    avg_importance = sum(memory["importance"] for memory in memories) / total_entries
+    total_accesses = sum(memory["access_count"] for memory in memories)
+    return {
+        "total_entries": total_entries,
+        "avg_importance": avg_importance,
+        "total_accesses": total_accesses,
+    }

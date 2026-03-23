@@ -3,10 +3,12 @@
 import json
 
 from self_evolving.dashboard.data import (
+    build_benchmark_comparison,
     load_agent_memory,
     load_benchmark_sessions,
     load_benchmark_variant,
     load_recent_runs,
+    summarize_memory,
 )
 from self_evolving.persistence.sqlite_store import SQLiteStore
 
@@ -32,6 +34,11 @@ def test_dashboard_data_loaders_for_sqlite(tmp_path):
     assert len(memory) == 1
     assert memory[0]["content"] == "Capital of France is Paris."
 
+    summary = summarize_memory(memory)
+    assert summary["total_entries"] == 1
+    assert summary["avg_importance"] == 1.5
+    assert summary["total_accesses"] == 0
+
 
 def test_dashboard_data_loaders_for_benchmarks(tmp_path):
     session_dir = tmp_path / "benchmarks" / "20260101-000000"
@@ -53,3 +60,8 @@ def test_dashboard_data_loaders_for_benchmarks(tmp_path):
 
     loaded_variant = load_benchmark_variant(str(session_dir), "baseline")
     assert loaded_variant["name"] == "baseline"
+
+    comparison = build_benchmark_comparison(sessions[0])
+    assert len(comparison) == 1
+    assert comparison[0]["variant"] == "baseline"
+    assert comparison[0]["success_rate"] == 1.0
