@@ -14,6 +14,7 @@ The current codebase already supports:
 - vector-based episodic memory retrieval with a local embedder fallback
 - SQLite persistence for runs, steps, and memory
 - a FastAPI service layer for executing and inspecting runs
+- a benchmark runner that compares agent variants and writes JSON artifacts
 - prompt optimization with an OPRO-style loop
 - verbal reflection with retry
 - runtime tool generation and registration
@@ -119,6 +120,15 @@ src/self_evolving/
   - evolution gain
   - stability
   - adaptation speed
+
+### Benchmark runner
+- `src/self_evolving/evaluation/benchmark.py`
+- Compares:
+  - baseline
+  - memory
+  - reflexion
+  - prompt optimization
+- Writes JSON artifacts for each variant plus a session summary.
 
 ## What This Repo Is Right Now
 
@@ -265,6 +275,11 @@ python examples/04_prompt_optimization.py
 ### 5. Tool learning
 ```bash
 python examples/05_tool_learning.py
+```
+
+### 6. Benchmark runner
+```bash
+python examples/06_benchmark_runner.py
 ```
 
 ## Tests
