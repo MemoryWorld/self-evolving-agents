@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pandas as pd
 import streamlit as st
@@ -12,6 +13,8 @@ from self_evolving.dashboard.data import (
     build_benchmark_comparison,
     load_agent_memory,
     load_benchmark_sessions,
+    load_job,
+    load_jobs,
     load_benchmark_variant,
     load_recent_runs,
     load_run_detail,
@@ -24,6 +27,73 @@ from self_evolving.dashboard.data import (
 DB_PATH = os.getenv("SEA_DB_PATH", ".data/sea.db")
 BENCHMARK_DIR = os.getenv("SEA_BENCHMARK_DIR", "runs/benchmarks")
 API_BASE = os.getenv("SEA_API_BASE", "http://127.0.0.1:8000")
+
+
+def _remember_job(job_id: str) -> None:
+    active_jobs = st.session_state.setdefault("active_job_ids", [])
+    if job_id not in active_jobs:
+        active_jobs.insert(0, job_id)
+    st.session_state["active_job_ids"] = active_jobs[:10]
+
+
+def render_job_monitor() -> None:
+    st.subheader("Job Monitor")
+    active_job_ids = st.session_state.get("active_job_ids", [])
+
+    try:
+        recent_jobs = load_jobs(API_BASE, limit=10)
+    except Exception as exc:
+        st.warning(f"Could not load jobs from API: {exc}")
+        return
+
+    jobs_by_id = {job["job_id"]: job for job in recent_jobs}
+    ordered_jobs = []
+    for job_id in active_job_ids:
+        job = jobs_by_id.get(job_id)
+        if job is None:
+            try:
+                job = load_job(API_BASE, job_id)
+            except Exception:
+                continue
+        ordered_jobs.append(job)
+
+    for job in recent_jobs:
+        if job["job_id"] not in {item["job_id"] for item in ordered_jobs}:
+            ordered_jobs.append(job)
+
+    if not ordered_jobs:
+        st.info("No jobs have been submitted yet.")
+        return
+
+    active_count = 0
+    for job in ordered_jobs[:10]:
+        is_active = job["status"] in {"queued", "running"}
+        if is_active:
+            active_count += 1
+
+        label = f"{job['kind']} | {job['status']} | {job['job_id'][:8]}"
+        with st.expander(label, expanded=is_active):
+            st.progress(int(job["progress"]))
+            st.caption(f"Stage: {job['stage']}")
+            st.json(
+                {
+                    "job_id": job["job_id"],
+                    "kind": job["kind"],
+                    "status": job["status"],
+                    "progress": job["progress"],
+                    "stage": job["stage"],
+                    "metadata": job.get("metadata", {}),
+                    "error": job.get("error"),
+                }
+            )
+            if job.get("result") is not None:
+                st.subheader("Result")
+                st.json(job["result"])
+
+    if active_count:
+        st.caption("Active jobs detected. Refreshing every 2 seconds.")
+        time.sleep(2)
+        st.rerun()
 
 
 def render_overview() -> None:
@@ -172,6 +242,7 @@ def render_benchmarks() -> None:
 def render_control_plane() -> None:
     st.header("Control Plane")
     st.caption(f"API: {API_BASE}")
+    render_job_monitor()
 
     with st.expander("Create QA Run", expanded=True):
         with st.form("qa_run_form"):
@@ -192,7 +263,8 @@ def render_control_plane() -> None:
             }
             try:
                 result = trigger_run(API_BASE, payload)
-                st.success(f"Run created: {result.get('run_id')}")
+                _remember_job(result["job_id"])
+                st.success(f"Run job created: {result['job_id']}")
                 st.json(result)
                 st.rerun()
             except Exception as exc:
@@ -225,7 +297,8 @@ def render_control_plane() -> None:
                     "model": benchmark_model or None,
                 }
                 result = trigger_benchmark(API_BASE, payload)
-                st.success(f"Benchmark session created: {result.get('session_dir')}")
+                _remember_job(result["job_id"])
+                st.success(f"Benchmark job created: {result['job_id']}")
                 st.json(result)
                 st.rerun()
             except Exception as exc:

@@ -234,7 +234,7 @@ Run the API:
 uvicorn self_evolving.service.api:create_app --factory --reload
 ```
 
-Create a persisted QA run:
+Create a QA run job:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/runs/qa \
@@ -247,7 +247,33 @@ curl -X POST http://127.0.0.1:8000/runs/qa \
   }'
 ```
 
-Inspect stored runs:
+The API now returns a job record immediately. Poll the job until it reaches `completed`:
+
+```bash
+curl http://127.0.0.1:8000/jobs/<job_id>
+```
+
+Create a benchmark job:
+
+```bash
+curl -X POST http://127.0.0.1:8000/benchmarks/qa \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tasks": [
+      {"goal": "What is the capital of France?", "reference_answer": "Paris"},
+      {"goal": "What is 12 * 7?", "reference_answer": "84"}
+    ],
+    "variants": ["baseline", "memory", "reflexion"]
+  }'
+```
+
+Inspect recent jobs:
+
+```bash
+curl http://127.0.0.1:8000/jobs
+```
+
+Inspect persisted runs:
 
 ```bash
 curl http://127.0.0.1:8000/runs
@@ -310,17 +336,17 @@ Use it when you want the dashboard to have data immediately without calling a re
 
 ## Next Step
 
-The next practical step after the current control-plane dashboard is:
+The next practical step after the current background-job control plane is:
 
-- move run and benchmark execution into background jobs
+- persist job state and execution logs beyond the API process
 
 That would let the system:
-- accept longer-running tasks without blocking the request
-- expose run status polling and progress updates
-- keep the dashboard responsive during benchmarks
-- prepare the API for queueing, retries, and later multi-worker execution
+- survive API restarts without losing in-flight job history
+- retain richer execution traces for debugging and demos
+- support retries, cancellation, and queued scheduling more cleanly
+- prepare the project for container deployment and CI smoke tests
 
-In other words, the next upgrade is turning the current lightweight control plane into a more realistic agent operations surface.
+In other words, the next upgrade is turning the current local control plane into a more durable single-node agent platform.
 
 ## Tests
 

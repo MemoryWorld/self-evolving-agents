@@ -12,7 +12,7 @@ Core idea:
 from __future__ import annotations
 import logging
 import os
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import litellm
 
@@ -102,12 +102,32 @@ class ReflexionAgent:
         self.reflector = reflector or ReflexionReflector(model=agent.model)
         self.agent.reflector = self.reflector
 
-    def run(self, env, goal: str, task_id: Optional[str] = None):
+    def run(
+        self,
+        env,
+        goal: str,
+        task_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ):
         from self_evolving.core.environment import Environment
         original_prompt = self.agent.state.system_prompt
 
         for attempt in range(self.reflector.max_rounds):
-            trajectory = self.agent.run(env, goal, task_id)
+            def on_progress(progress: float, stage: str, detail: dict[str, Any]) -> None:
+                if progress_callback is None:
+                    return
+                scaled = ((attempt + (progress / 100.0)) / self.reflector.max_rounds) * 100.0
+                progress_callback(
+                    scaled,
+                    stage,
+                    {
+                        **detail,
+                        "attempt": attempt + 1,
+                        "max_attempts": self.reflector.max_rounds,
+                    },
+                )
+
+            trajectory = self.agent.run(env, goal, task_id, progress_callback=on_progress)
             if trajectory.success:
                 self.agent.state.system_prompt = original_prompt
                 return trajectory

@@ -8,6 +8,8 @@ from self_evolving.dashboard.data import (
     build_benchmark_comparison,
     load_agent_memory,
     load_benchmark_sessions,
+    load_job,
+    load_jobs,
     load_benchmark_variant,
     load_recent_runs,
     summarize_memory,
@@ -83,17 +85,29 @@ def test_dashboard_trigger_helpers(monkeypatch):
             return self._payload
 
     calls = []
+    gets = []
 
     def fake_post(url, json, timeout):
         calls.append((url, json, timeout))
         return DummyResponse({"ok": True, "url": url})
 
+    def fake_get(url, params=None, timeout=0):
+        gets.append((url, params, timeout))
+        return DummyResponse({"ok": True, "url": url})
+
     monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "get", fake_get)
 
     run_payload = trigger_run("http://127.0.0.1:8000", {"goal": "x"})
     benchmark_payload = trigger_benchmark("http://127.0.0.1:8000", {"tasks": []})
+    jobs_payload = load_jobs("http://127.0.0.1:8000")
+    job_payload = load_job("http://127.0.0.1:8000", "job-1")
 
     assert run_payload["ok"] is True
     assert benchmark_payload["ok"] is True
+    assert jobs_payload["ok"] is True
+    assert job_payload["ok"] is True
     assert calls[0][0].endswith("/runs/qa")
     assert calls[1][0].endswith("/benchmarks/qa")
+    assert gets[0][0].endswith("/jobs")
+    assert gets[1][0].endswith("/jobs/job-1")

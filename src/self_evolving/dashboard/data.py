@@ -90,6 +90,18 @@ def summarize_memory(memories: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def load_jobs(api_base: str, limit: int = 20) -> list[dict[str, Any]]:
+    response = httpx.get(f"{api_base.rstrip('/')}/jobs", params={"limit": limit}, timeout=15.0)
+    response.raise_for_status()
+    return response.json()
+
+
+def load_job(api_base: str, job_id: str) -> dict[str, Any]:
+    response = httpx.get(f"{api_base.rstrip('/')}/jobs/{job_id}", timeout=15.0)
+    response.raise_for_status()
+    return response.json()
+
+
 def trigger_run(api_base: str, payload: dict[str, Any]) -> dict[str, Any]:
     response = httpx.post(f"{api_base.rstrip('/')}/runs/qa", json=payload, timeout=60.0)
     response.raise_for_status()

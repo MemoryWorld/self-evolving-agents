@@ -1,10 +1,24 @@
 """API tests."""
 
+import time
+
 from fastapi.testclient import TestClient
 
 from self_evolving.core.agent import BaseAgent
 from self_evolving.evolution.prompt.opro import OPROOptimizer
 from self_evolving.service.api import create_app
+
+
+def _wait_for_job_completion(client: TestClient, job_id: str, timeout: float = 2.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        response = client.get(f"/jobs/{job_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"completed", "failed"}:
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"Job {job_id} did not complete in time")
 
 
 def test_run_qa_and_fetch_persisted_data(tmp_path, monkeypatch):
@@ -24,7 +38,12 @@ def test_run_qa_and_fetch_persisted_data(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    job = response.json()
+    assert job["kind"] == "qa_run"
+    assert job["job_id"]
+
+    completed_job = _wait_for_job_completion(client, job["job_id"])
+    payload = completed_job["result"]
     assert payload["task_id"]
     assert payload["agent_id"] == "api-agent"
     assert payload["run_id"]
@@ -71,7 +90,15 @@ def test_run_benchmark_endpoint(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    job = response.json()
+    assert job["kind"] == "qa_benchmark"
+
+    completed_job = _wait_for_job_completion(client, job["job_id"])
+    payload = completed_job["result"]
     assert payload["task_count"] == 2
     assert "baseline" in payload["variants"]
     assert "memory" in payload["variants"]
+
+    jobs = client.get("/jobs")
+    assert jobs.status_code == 200
+    assert len(jobs.json()) >= 1

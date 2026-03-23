@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import uuid
 import logging
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import litellm
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -72,13 +72,21 @@ class BaseAgent:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, env: Environment, goal: str, task_id: Optional[str] = None) -> Trajectory:
+    def run(
+        self,
+        env: Environment,
+        goal: str,
+        task_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> Trajectory:
         """Execute a full task episode and return the trajectory."""
         task_id = task_id or str(uuid.uuid4())[:8]
         obs = env.reset(goal)
         trajectory = Trajectory(task_id=task_id, goal=goal)
         self._current_trajectory = trajectory
         self._reset_conversation()
+        if progress_callback:
+            progress_callback(0.0, "starting", {"task_id": task_id, "goal": goal})
 
         for step_idx in range(self.max_steps):
             # Augment observation with relevant memories
@@ -94,6 +102,18 @@ class BaseAgent:
             )
             trajectory.steps.append(step)
             self.observe(feedback)
+            if progress_callback:
+                progress_callback(
+                    ((step_idx + 1) / self.max_steps) * 100.0,
+                    "running",
+                    {
+                        "task_id": task_id,
+                        "goal": goal,
+                        "step_index": step_idx,
+                        "max_steps": self.max_steps,
+                        "done": done,
+                    },
+                )
 
             if done:
                 trajectory.final_feedback = feedback
@@ -114,6 +134,19 @@ class BaseAgent:
                 agent=self,
                 env_name=env.name,
                 trajectory=trajectory,
+            )
+
+        if progress_callback:
+            progress_callback(
+                100.0,
+                "completed",
+                {
+                    "task_id": task_id,
+                    "goal": goal,
+                    "num_steps": len(trajectory.steps),
+                    "success": trajectory.success,
+                    "run_id": trajectory.metadata.get("run_id"),
+                },
             )
 
         return trajectory

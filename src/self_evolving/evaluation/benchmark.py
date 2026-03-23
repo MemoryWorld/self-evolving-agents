@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from self_evolving.core.agent import BaseAgent
 from self_evolving.core.environment import SimpleQAEnvironment
@@ -61,18 +61,48 @@ class BenchmarkRunner:
         self.store = store
         self.agent_id_prefix = agent_id_prefix
 
-    def run(self, variants: Optional[list[str]] = None) -> dict:
+    def run(
+        self,
+        variants: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> dict:
         variants = variants or list(self.DEFAULT_VARIANTS)
+        ordered_variants = ["baseline"] + [variant for variant in variants if variant != "baseline"]
         session_dir = self._make_session_dir()
+        if progress_callback:
+            progress_callback(0.0, "starting", {"variant": "baseline"})
 
-        baseline_result = self._run_baseline()
+        def make_variant_progress(variant_index: int, variant_name: str):
+            def callback(progress: float, stage: str, detail: dict[str, Any]) -> None:
+                if progress_callback is None:
+                    return
+                overall = ((variant_index + (progress / 100.0)) / len(ordered_variants)) * 100.0
+                progress_callback(
+                    overall,
+                    stage,
+                    {
+                        "variant": variant_name,
+                        "variant_index": variant_index,
+                        "variant_count": len(ordered_variants),
+                        **detail,
+                    },
+                )
+            return callback
+
+        baseline_result = self._run_baseline(
+            progress_callback=make_variant_progress(0, "baseline")
+        )
         results: dict[str, VariantResult] = {"baseline": baseline_result}
         self._write_variant_artifact(session_dir, baseline_result)
 
-        for variant in variants:
+        for variant_index, variant in enumerate(ordered_variants[1:], start=1):
             if variant == "baseline":
                 continue
-            result = self._run_variant(variant, baseline_result.success_rate)
+            result = self._run_variant(
+                variant,
+                baseline_result.success_rate,
+                progress_callback=make_variant_progress(variant_index, variant),
+            )
             results[variant] = result
             self._write_variant_artifact(session_dir, result)
 
@@ -83,42 +113,84 @@ class BenchmarkRunner:
             "variants": {name: asdict(result) for name, result in results.items()},
         }
         self._write_summary_artifact(session_dir, summary)
+        if progress_callback:
+            progress_callback(100.0, "completed", {"session_dir": str(session_dir)})
         return summary
 
-    def _run_variant(self, variant: str, baseline_success_rate: float) -> VariantResult:
+    def _run_variant(
+        self,
+        variant: str,
+        baseline_success_rate: float,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> VariantResult:
         if variant == "memory":
-            return self._run_memory(baseline_success_rate)
+            return self._run_memory(baseline_success_rate, progress_callback=progress_callback)
         if variant == "reflexion":
-            return self._run_reflexion(baseline_success_rate)
+            return self._run_reflexion(baseline_success_rate, progress_callback=progress_callback)
         if variant == "prompt_optimization":
-            return self._run_prompt_optimization(baseline_success_rate)
+            return self._run_prompt_optimization(
+                baseline_success_rate,
+                progress_callback=progress_callback,
+            )
         raise ValueError(f"Unsupported benchmark variant: {variant}")
 
-    def _run_baseline(self) -> VariantResult:
+    def _run_baseline(
+        self,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> VariantResult:
         agent = self._make_agent("baseline")
         metrics = EvolutionMetrics()
-        episodes = self._run_tasks_with_agent(agent, metrics)
+        episodes = self._run_tasks_with_agent(
+            agent,
+            metrics,
+            variant_name="baseline",
+            progress_callback=progress_callback,
+        )
         report = metrics.report()
         return self._build_result("baseline", report, episodes)
 
-    def _run_memory(self, baseline_success_rate: float) -> VariantResult:
+    def _run_memory(
+        self,
+        baseline_success_rate: float,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> VariantResult:
         agent = self._make_agent("memory")
         agent.memory = EpisodicMemory()
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
-        episodes = self._run_tasks_with_agent(agent, metrics)
+        episodes = self._run_tasks_with_agent(
+            agent,
+            metrics,
+            variant_name="memory",
+            progress_callback=progress_callback,
+        )
         report = metrics.report()
         return self._build_result("memory", report, episodes)
 
-    def _run_reflexion(self, baseline_success_rate: float) -> VariantResult:
+    def _run_reflexion(
+        self,
+        baseline_success_rate: float,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> VariantResult:
         agent = self._make_agent("reflexion")
         wrapped = ReflexionAgent(agent, ReflexionReflector(model=agent.model, max_rounds=2))
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
-        episodes = self._run_tasks_with_runner(wrapped, metrics)
+        episodes = self._run_tasks_with_runner(
+            wrapped,
+            metrics,
+            variant_name="reflexion",
+            progress_callback=progress_callback,
+        )
         report = metrics.report()
         return self._build_result("reflexion", report, episodes)
 
-    def _run_prompt_optimization(self, baseline_success_rate: float) -> VariantResult:
+    def _run_prompt_optimization(
+        self,
+        baseline_success_rate: float,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> VariantResult:
         initial_prompt = BaseAgent.DEFAULT_SYSTEM
+        if progress_callback:
+            progress_callback(5.0, "optimizing_prompt", {"variant": "prompt_optimization"})
         optimizer = OPROOptimizer(model=self.model, max_iterations=3, batch_size=min(4, len(self.tasks)))
         eval_fn = self._make_eval_fn()
         best_prompt = optimizer.optimize(
@@ -126,10 +198,23 @@ class BenchmarkRunner:
             eval_fn=eval_fn,
             task_description="benchmark question answering",
         )
+        if progress_callback:
+            progress_callback(30.0, "optimized_prompt", {"variant": "prompt_optimization"})
 
         agent = self._make_agent("prompt_optimization", system_prompt=best_prompt)
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
-        episodes = self._run_tasks_with_agent(agent, metrics)
+        def on_task_progress(progress: float, stage: str, detail: dict[str, Any]) -> None:
+            if progress_callback is None:
+                return
+            scaled = 30.0 + (progress * 0.7)
+            progress_callback(scaled, stage, detail)
+
+        episodes = self._run_tasks_with_agent(
+            agent,
+            metrics,
+            variant_name="prompt_optimization",
+            progress_callback=on_task_progress,
+        )
         report = metrics.report()
         return self._build_result(
             "prompt_optimization",
@@ -169,20 +254,74 @@ class BenchmarkRunner:
         agent.store = self.store
         return agent
 
-    def _run_tasks_with_agent(self, agent: BaseAgent, metrics: EvolutionMetrics) -> list[dict]:
+    def _run_tasks_with_agent(
+        self,
+        agent: BaseAgent,
+        metrics: EvolutionMetrics,
+        *,
+        variant_name: str,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> list[dict]:
         env = SimpleQAEnvironment([(task.goal, task.reference_answer) for task in self.tasks])
         episodes = []
         for index, task in enumerate(self.tasks):
-            trajectory = agent.run(env, goal=task.goal, task_id=f"task_{index}")
+            def on_progress(progress: float, stage: str, detail: dict[str, Any]) -> None:
+                if progress_callback is None:
+                    return
+                overall = ((index + (progress / 100.0)) / len(self.tasks)) * 100.0
+                progress_callback(
+                    overall,
+                    stage,
+                    {
+                        **detail,
+                        "variant": variant_name,
+                        "task_index": index,
+                        "task_count": len(self.tasks),
+                    },
+                )
+
+            trajectory = agent.run(
+                env,
+                goal=task.goal,
+                task_id=f"task_{index}",
+                progress_callback=on_progress,
+            )
             metrics.record(trajectory, evolution_round=index)
             episodes.append(self._trajectory_to_dict(trajectory))
         return episodes
 
-    def _run_tasks_with_runner(self, runner, metrics: EvolutionMetrics) -> list[dict]:
+    def _run_tasks_with_runner(
+        self,
+        runner,
+        metrics: EvolutionMetrics,
+        *,
+        variant_name: str,
+        progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
+    ) -> list[dict]:
         env = SimpleQAEnvironment([(task.goal, task.reference_answer) for task in self.tasks])
         episodes = []
         for index, task in enumerate(self.tasks):
-            trajectory = runner.run(env, goal=task.goal, task_id=f"task_{index}")
+            def on_progress(progress: float, stage: str, detail: dict[str, Any]) -> None:
+                if progress_callback is None:
+                    return
+                overall = ((index + (progress / 100.0)) / len(self.tasks)) * 100.0
+                progress_callback(
+                    overall,
+                    stage,
+                    {
+                        **detail,
+                        "variant": variant_name,
+                        "task_index": index,
+                        "task_count": len(self.tasks),
+                    },
+                )
+
+            trajectory = runner.run(
+                env,
+                goal=task.goal,
+                task_id=f"task_{index}",
+                progress_callback=on_progress,
+            )
             metrics.record(trajectory, evolution_round=index)
             episodes.append(self._trajectory_to_dict(trajectory))
         return episodes
