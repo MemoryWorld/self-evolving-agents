@@ -2,6 +2,8 @@
 
 import json
 
+import httpx
+
 from self_evolving.dashboard.data import (
     build_benchmark_comparison,
     load_agent_memory,
@@ -9,6 +11,8 @@ from self_evolving.dashboard.data import (
     load_benchmark_variant,
     load_recent_runs,
     summarize_memory,
+    trigger_benchmark,
+    trigger_run,
 )
 from self_evolving.persistence.sqlite_store import SQLiteStore
 
@@ -65,3 +69,31 @@ def test_dashboard_data_loaders_for_benchmarks(tmp_path):
     assert len(comparison) == 1
     assert comparison[0]["variant"] == "baseline"
     assert comparison[0]["success_rate"] == 1.0
+
+
+def test_dashboard_trigger_helpers(monkeypatch):
+    class DummyResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append((url, json, timeout))
+        return DummyResponse({"ok": True, "url": url})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    run_payload = trigger_run("http://127.0.0.1:8000", {"goal": "x"})
+    benchmark_payload = trigger_benchmark("http://127.0.0.1:8000", {"tasks": []})
+
+    assert run_payload["ok"] is True
+    assert benchmark_payload["ok"] is True
+    assert calls[0][0].endswith("/runs/qa")
+    assert calls[1][0].endswith("/benchmarks/qa")

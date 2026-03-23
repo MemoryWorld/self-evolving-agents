@@ -13,9 +13,9 @@ The current codebase already supports:
 - episodic memory with distilled lessons
 - vector-based episodic memory retrieval with a local embedder fallback
 - SQLite persistence for runs, steps, and memory
-- a FastAPI service layer for executing and inspecting runs
+- a FastAPI service layer for executing runs, benchmarks, and inspection queries
 - a benchmark runner that compares agent variants and writes JSON artifacts
-- a Streamlit dashboard for runs, memory, and benchmark artifacts
+- a Streamlit dashboard with a lightweight control plane for runs, memory, and benchmark artifacts
 - prompt optimization with an OPRO-style loop
 - verbal reflection with retry
 - runtime tool generation and registration
@@ -165,10 +165,9 @@ That is not yet enough for:
 ## Major Gaps
 
 ### Engineering gaps
-- no dashboard
-- no benchmark automation
 - no container delivery files
 - no CI workflow
+- no background job execution for long-running runs and benchmarks
 
 ### Systems / platform gaps
 - no safe tool sandbox
@@ -192,8 +191,8 @@ The immediate upgrade path is:
 3. upgrade memory from keyword retrieval to vector retrieval
 4. add a benchmark runner
 5. harden the FastAPI service and add async job execution
-6. add a safer tool sandbox
-7. add a lightweight dashboard
+6. add a lightweight dashboard and control plane
+7. add a safer tool sandbox
 8. add Docker and CI
 
 The detailed execution breakdown is in:
@@ -311,18 +310,17 @@ Use it when you want the dashboard to have data immediately without calling a re
 
 ## Next Step
 
-The next practical step after the current dashboard is:
+The next practical step after the current control-plane dashboard is:
 
-- connect the dashboard to live API-triggered execution
+- move run and benchmark execution into background jobs
 
-That would let the UI:
-- submit a new task
-- persist the run
-- refresh run history
-- refresh memory
-- refresh benchmark artifacts after execution
+That would let the system:
+- accept longer-running tasks without blocking the request
+- expose run status polling and progress updates
+- keep the dashboard responsive during benchmarks
+- prepare the API for queueing, retries, and later multi-worker execution
 
-In other words, the next upgrade is turning the dashboard from a viewer into a lightweight control plane.
+In other words, the next upgrade is turning the current lightweight control plane into a more realistic agent operations surface.
 
 ## Tests
 

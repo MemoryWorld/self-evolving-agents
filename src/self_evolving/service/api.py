@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from self_evolving.core.agent import BaseAgent
 from self_evolving.core.environment import SimpleQAEnvironment
+from self_evolving.evaluation.benchmark import BenchmarkRunner, BenchmarkTask
 from self_evolving.evolution.memory.episodic import EpisodicMemory
 from self_evolving.persistence.sqlite_store import SQLiteStore
 
@@ -37,6 +38,24 @@ class RunResponse(BaseModel):
     reflection: Optional[str] = None
 
 
+class BenchmarkTaskRequest(BaseModel):
+    goal: str = Field(..., min_length=1)
+    reference_answer: str = Field(..., min_length=1)
+
+
+class BenchmarkRequest(BaseModel):
+    tasks: list[BenchmarkTaskRequest]
+    variants: list[str] = Field(default_factory=lambda: list(BenchmarkRunner.DEFAULT_VARIANTS))
+    model: Optional[str] = None
+    max_steps: int = Field(default=20, ge=1, le=100)
+
+
+class BenchmarkResponse(BaseModel):
+    session_dir: str
+    task_count: int
+    variants: dict
+
+
 def _build_agent(request: QARunRequest, store: SQLiteStore) -> BaseAgent:
     agent = BaseAgent(
         model=request.model,
@@ -56,6 +75,7 @@ def _build_agent(request: QARunRequest, store: SQLiteStore) -> BaseAgent:
 
 def create_app(db_path: str | None = None) -> FastAPI:
     db_path = db_path or os.getenv("SEA_DB_PATH", ".data/sea.db")
+    benchmark_dir = os.getenv("SEA_BENCHMARK_DIR", "runs/benchmarks")
     store = SQLiteStore(db_path)
 
     @asynccontextmanager
@@ -109,5 +129,25 @@ def create_app(db_path: str | None = None) -> FastAPI:
     async def get_agent_memory(agent_id: str, limit: int = 50) -> list[dict]:
         store: SQLiteStore = app.state.store
         return store.list_memory(agent_id, limit=limit)
+
+    @app.post("/benchmarks/qa", response_model=BenchmarkResponse)
+    async def run_qa_benchmark(request: BenchmarkRequest) -> BenchmarkResponse:
+        tasks = [
+            BenchmarkTask(task.goal, task.reference_answer)
+            for task in request.tasks
+        ]
+        runner = BenchmarkRunner(
+            tasks=tasks,
+            output_dir=benchmark_dir,
+            model=request.model,
+            max_steps=request.max_steps,
+            store=app.state.store,
+        )
+        summary = runner.run(variants=request.variants)
+        return BenchmarkResponse(
+            session_dir=summary["session_dir"],
+            task_count=summary["task_count"],
+            variants=summary["variants"],
+        )
 
     return app

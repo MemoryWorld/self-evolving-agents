@@ -14,6 +14,7 @@ from self_evolving.evaluation.metrics import EvolutionMetrics
 from self_evolving.evolution.memory.episodic import EpisodicMemory
 from self_evolving.evolution.prompt.opro import OPROOptimizer
 from self_evolving.mechanisms.reflection.reflexion import ReflexionAgent, ReflexionReflector
+from self_evolving.persistence.sqlite_store import SQLiteStore
 
 
 @dataclass
@@ -46,6 +47,8 @@ class BenchmarkRunner:
         output_dir: str = "runs/benchmarks",
         model: Optional[str] = None,
         max_steps: int = 20,
+        store: Optional[SQLiteStore] = None,
+        agent_id_prefix: str = "benchmark",
     ):
         self.tasks = [
             task if isinstance(task, BenchmarkTask) else BenchmarkTask(*task)
@@ -55,6 +58,8 @@ class BenchmarkRunner:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.model = model
         self.max_steps = max_steps
+        self.store = store
+        self.agent_id_prefix = agent_id_prefix
 
     def run(self, variants: Optional[list[str]] = None) -> dict:
         variants = variants or list(self.DEFAULT_VARIANTS)
@@ -73,6 +78,7 @@ class BenchmarkRunner:
 
         summary = {
             "generated_at": datetime.now(UTC).isoformat(),
+            "session_dir": str(session_dir),
             "task_count": len(self.tasks),
             "variants": {name: asdict(result) for name, result in results.items()},
         }
@@ -89,14 +95,14 @@ class BenchmarkRunner:
         raise ValueError(f"Unsupported benchmark variant: {variant}")
 
     def _run_baseline(self) -> VariantResult:
-        agent = BaseAgent(model=self.model, max_steps=self.max_steps)
+        agent = self._make_agent("baseline")
         metrics = EvolutionMetrics()
         episodes = self._run_tasks_with_agent(agent, metrics)
         report = metrics.report()
         return self._build_result("baseline", report, episodes)
 
     def _run_memory(self, baseline_success_rate: float) -> VariantResult:
-        agent = BaseAgent(model=self.model, max_steps=self.max_steps)
+        agent = self._make_agent("memory")
         agent.memory = EpisodicMemory()
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
         episodes = self._run_tasks_with_agent(agent, metrics)
@@ -104,7 +110,7 @@ class BenchmarkRunner:
         return self._build_result("memory", report, episodes)
 
     def _run_reflexion(self, baseline_success_rate: float) -> VariantResult:
-        agent = BaseAgent(model=self.model, max_steps=self.max_steps)
+        agent = self._make_agent("reflexion")
         wrapped = ReflexionAgent(agent, ReflexionReflector(model=agent.model, max_rounds=2))
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
         episodes = self._run_tasks_with_runner(wrapped, metrics)
@@ -121,7 +127,7 @@ class BenchmarkRunner:
             task_description="benchmark question answering",
         )
 
-        agent = BaseAgent(model=self.model, max_steps=self.max_steps, system_prompt=best_prompt)
+        agent = self._make_agent("prompt_optimization", system_prompt=best_prompt)
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
         episodes = self._run_tasks_with_agent(agent, metrics)
         report = metrics.report()
@@ -152,6 +158,16 @@ class BenchmarkRunner:
             return successes / len(tasks) if tasks else 0.0
 
         return eval_fn
+
+    def _make_agent(self, variant: str, system_prompt: Optional[str] = None) -> BaseAgent:
+        agent = BaseAgent(
+            model=self.model,
+            max_steps=self.max_steps,
+            system_prompt=system_prompt,
+            agent_id=f"{self.agent_id_prefix}-{variant}",
+        )
+        agent.store = self.store
+        return agent
 
     def _run_tasks_with_agent(self, agent: BaseAgent, metrics: EvolutionMetrics) -> list[dict]:
         env = SimpleQAEnvironment([(task.goal, task.reference_answer) for task in self.tasks])

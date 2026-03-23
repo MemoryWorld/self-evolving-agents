@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pandas as pd
@@ -15,11 +16,14 @@ from self_evolving.dashboard.data import (
     load_recent_runs,
     load_run_detail,
     summarize_memory,
+    trigger_benchmark,
+    trigger_run,
 )
 
 
 DB_PATH = os.getenv("SEA_DB_PATH", ".data/sea.db")
 BENCHMARK_DIR = os.getenv("SEA_BENCHMARK_DIR", "runs/benchmarks")
+API_BASE = os.getenv("SEA_API_BASE", "http://127.0.0.1:8000")
 
 
 def render_overview() -> None:
@@ -165,6 +169,69 @@ def render_benchmarks() -> None:
             st.dataframe(pd.DataFrame(episodes), use_container_width=True)
 
 
+def render_control_plane() -> None:
+    st.header("Control Plane")
+    st.caption(f"API: {API_BASE}")
+
+    with st.expander("Create QA Run", expanded=True):
+        with st.form("qa_run_form"):
+            goal = st.text_input("Goal", value="What is the capital of France?")
+            reference_answer = st.text_input("Reference answer", value="Paris")
+            agent_id = st.text_input("Agent ID", value="dashboard-agent")
+            model = st.text_input("Model override", value="")
+            use_memory = st.checkbox("Use memory", value=True)
+            submitted = st.form_submit_button("Run Task")
+
+        if submitted:
+            payload = {
+                "goal": goal,
+                "reference_answer": reference_answer,
+                "agent_id": agent_id or None,
+                "model": model or None,
+                "use_memory": use_memory,
+            }
+            try:
+                result = trigger_run(API_BASE, payload)
+                st.success(f"Run created: {result.get('run_id')}")
+                st.json(result)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Run trigger failed: {exc}")
+
+    with st.expander("Create Benchmark Session", expanded=True):
+        default_tasks = [
+            {"goal": "What is the capital of France?", "reference_answer": "Paris"},
+            {"goal": "What is 12 * 7?", "reference_answer": "84"},
+            {"goal": "Who wrote Hamlet?", "reference_answer": "Shakespeare"},
+            {"goal": "What planet is known as the Red Planet?", "reference_answer": "Mars"},
+        ]
+        with st.form("benchmark_form"):
+            tasks_json = st.text_area(
+                "Tasks JSON",
+                value=json.dumps(default_tasks, indent=2),
+                height=220,
+            )
+            variant_options = ["baseline", "memory", "reflexion", "prompt_optimization"]
+            variants = st.multiselect("Variants", variant_options, default=variant_options)
+            benchmark_model = st.text_input("Model override for benchmark", value="")
+            benchmark_submitted = st.form_submit_button("Run Benchmark")
+
+        if benchmark_submitted:
+            try:
+                tasks = json.loads(tasks_json)
+                payload = {
+                    "tasks": tasks,
+                    "variants": variants,
+                    "model": benchmark_model or None,
+                }
+                result = trigger_benchmark(API_BASE, payload)
+                st.success(f"Benchmark session created: {result.get('session_dir')}")
+                st.json(result)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Benchmark trigger failed: {exc}")
+
+
 def main() -> None:
     st.set_page_config(page_title="Self-Evolving Agents Dashboard", layout="wide")
     st.title("Self-Evolving Agents Dashboard")
@@ -172,7 +239,7 @@ def main() -> None:
 
     page = st.sidebar.radio(
         "Page",
-        ["Overview", "Runs", "Memory", "Benchmarks"],
+        ["Overview", "Runs", "Memory", "Benchmarks", "Control Plane"],
     )
 
     if page == "Overview":
@@ -181,8 +248,10 @@ def main() -> None:
         render_runs()
     elif page == "Memory":
         render_memory()
-    else:
+    elif page == "Benchmarks":
         render_benchmarks()
+    else:
+        render_control_plane()
 
 
 if __name__ == "__main__":

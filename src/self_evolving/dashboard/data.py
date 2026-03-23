@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from self_evolving.persistence.sqlite_store import SQLiteStore
 
 
@@ -86,3 +88,15 @@ def summarize_memory(memories: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_importance": avg_importance,
         "total_accesses": total_accesses,
     }
+
+
+def trigger_run(api_base: str, payload: dict[str, Any]) -> dict[str, Any]:
+    response = httpx.post(f"{api_base.rstrip('/')}/runs/qa", json=payload, timeout=60.0)
+    response.raise_for_status()
+    return response.json()
+
+
+def trigger_benchmark(api_base: str, payload: dict[str, Any]) -> dict[str, Any]:
+    response = httpx.post(f"{api_base.rstrip('/')}/benchmarks/qa", json=payload, timeout=120.0)
+    response.raise_for_status()
+    return response.json()
