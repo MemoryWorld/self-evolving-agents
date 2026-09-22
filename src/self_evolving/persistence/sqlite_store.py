@@ -8,7 +8,12 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
+
+
+class MemoryConflictError(RuntimeError):
+    """A stale agent tried to replace a newer memory snapshot."""
 
 
 class SQLiteStore:
@@ -20,10 +25,15 @@ class SQLiteStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -75,6 +85,12 @@ class SQLiteStore:
 
                 CREATE INDEX IF NOT EXISTS idx_memories_agent_id
                 ON memories (agent_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS memory_state (
+                    agent_id TEXT PRIMARY KEY,
+                    stored_count INTEGER NOT NULL DEFAULT 0,
+                    revision INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             columns = {
@@ -149,9 +165,11 @@ class SQLiteStore:
         return run_id
 
     def save_memory_entries(self, agent_id: str, entries: list[Any]) -> None:
+        """Legacy append interface; agent checkpoints use save_memory_snapshot."""
         if not entries:
             return
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.executemany(
                 """
                 INSERT INTO memories (
@@ -173,6 +191,67 @@ class SQLiteStore:
                     for entry in entries
                 ],
             )
+            conn.execute(
+                "INSERT INTO memory_state (agent_id, revision) VALUES (?, 1) "
+                "ON CONFLICT(agent_id) DO UPDATE SET revision = revision + 1",
+                (agent_id,),
+            )
+
+    def save_memory_snapshot(
+        self, agent_id: str, entries: list[dict[str, Any]], *,
+        stored_count: int, expected_revision: int,
+    ) -> int:
+        """Atomically replace one agent's entries and lifecycle counters.
+
+        Optimistic versioning rejects stale writers instead of silently losing
+        another run's memories. A caller must reload and rerun after a conflict.
+        """
+        if stored_count < 0:
+            raise ValueError("stored_count must be nonnegative")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = conn.execute(
+                "SELECT revision FROM memory_state WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            revision = state["revision"] if state else 0
+            if revision != expected_revision:
+                raise MemoryConflictError(
+                    f"Memory for {agent_id!r} changed: expected revision "
+                    f"{expected_revision}, found {revision}; reload and rerun"
+                )
+            conn.execute("DELETE FROM memories WHERE agent_id = ?", (agent_id,))
+            conn.executemany(
+                "INSERT INTO memories (agent_id, source_task, content, success, "
+                "importance, access_count, embedding_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(agent_id, item["source_task"], item["content"], int(item["success"]),
+                  float(item["importance"]), int(item["access_count"]),
+                  self._json_dump(item.get("embedding", [])), time.time()) for item in entries],
+            )
+            conn.execute(
+                "INSERT INTO memory_state (agent_id, stored_count, revision) VALUES (?, ?, ?) "
+                "ON CONFLICT(agent_id) DO UPDATE SET "
+                "stored_count = excluded.stored_count, revision = excluded.revision",
+                (agent_id, stored_count, revision + 1),
+            )
+        return revision + 1
+
+    def load_memory_snapshot(self, agent_id: str) -> dict[str, Any]:
+        """Read one consistent, oldest-first snapshot (including legacy rows)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            state = conn.execute(
+                "SELECT stored_count, revision FROM memory_state WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT source_task, content, success, importance, access_count, embedding_json "
+                "FROM memories WHERE agent_id = ? ORDER BY id ASC", (agent_id,),
+            ).fetchall()
+        return {
+            "entries": self._memory_rows(rows),
+            "stored_count": state["stored_count"] if state else 0,
+            "revision": state["revision"] if state else 0,
+        }
 
     def list_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -181,7 +260,7 @@ class SQLiteStore:
                 SELECT run_id, task_id, agent_id, env_name, goal, model, success,
                        total_reward, num_steps, created_at
                 FROM runs
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, run_id DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -220,6 +299,14 @@ class SQLiteStore:
             run["steps"].append(item)
         return run
 
+    def update_run_metadata(self, run_id: str, metadata: dict[str, Any]) -> None:
+        """Persist post-run wrapper evidence, such as Reflexion attempt links."""
+        with self._connect() as conn:
+            result = conn.execute("UPDATE runs SET metadata_json = ? WHERE run_id = ?",
+                                  (self._json_dump(metadata), run_id))
+            if result.rowcount != 1:
+                raise KeyError(f"Run not found: {run_id}")
+
     def list_memory(self, agent_id: str, limit: int = 100) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -227,11 +314,14 @@ class SQLiteStore:
                 SELECT source_task, content, success, importance, access_count, embedding_json
                 FROM memories
                 WHERE agent_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT ?
                 """,
                 (agent_id, limit),
             ).fetchall()
+        return self._memory_rows(rows)
+
+    def _memory_rows(self, rows) -> list[dict[str, Any]]:
         result = []
         for row in rows:
             item = dict(row)

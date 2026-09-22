@@ -53,6 +53,12 @@ class SimpleQAEnvironment(Environment):
 
     def __init__(self, qa_pairs: list[tuple[str, str]]):
         super().__init__("simple_qa")
+        if not qa_pairs or any(not question.strip() or not answer.strip()
+                               for question, answer in qa_pairs):
+            raise ValueError("QA pairs require nonempty questions and reference answers")
+        questions = [question.strip().casefold() for question, _ in qa_pairs]
+        if len(set(questions)) != len(questions):
+            raise ValueError("QA questions must be unique")
         self._qa_pairs = qa_pairs
         self._current_answer: str = ""
         self._done: bool = False
@@ -65,9 +71,13 @@ class SimpleQAEnvironment(Environment):
             if question.strip().lower() == goal.strip().lower():
                 self._current_answer = answer
                 break
+        else:
+            raise ValueError(f"No reference answer for goal: {goal!r}")
         return f"Question: {goal}"
 
     def step(self, action: str) -> tuple[str, Feedback, bool]:
+        if not self._current_answer:
+            raise RuntimeError("reset must select a valid QA goal before step")
         self._step_count += 1
         correct = self._current_answer.lower() in action.lower()
         self._done = True

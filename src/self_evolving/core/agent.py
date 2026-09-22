@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import uuid
 import logging
+from copy import deepcopy
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import litellm
@@ -15,7 +16,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from self_evolving.core.types import (
     AgentState, Trajectory, Step, Feedback, FeedbackType, Message,
-    EvolutionRecord, EvolutionTarget, EvolutionStage,
+    EvolutionRecord,
 )
 from self_evolving.core.environment import Environment
 
@@ -37,7 +38,7 @@ class BaseAgent:
             action = agent.act(obs)
             obs, feedback, done = env.step(action)
             agent.observe(feedback)
-        agent.evolve(trajectory)   ← inter-test-time evolution hook
+        optionally reflect, distil memory, and persist the episode
     """
 
     DEFAULT_SYSTEM = (
@@ -52,6 +53,8 @@ class BaseAgent:
         max_steps: int = 20,
         agent_id: Optional[str] = None,
     ):
+        if max_steps < 1:
+            raise ValueError("max_steps must be positive")
         self.agent_id = agent_id or str(uuid.uuid4())[:8]
         self.model = model or os.getenv("SEA_MODEL", "deepseek/deepseek-chat")
         self.state = AgentState(
@@ -67,6 +70,7 @@ class BaseAgent:
 
         self._conversation: list[Message] = []
         self._current_trajectory: Optional[Trajectory] = None
+        self._memory_revision: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -80,6 +84,8 @@ class BaseAgent:
         progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
     ) -> Trajectory:
         """Execute a full task episode and return the trajectory."""
+        if self.memory is not None and self.store is not None and self._memory_revision is None:
+            self.load_memory(preserve_initial=True)
         task_id = task_id or str(uuid.uuid4())[:8]
         obs = env.reset(goal)
         trajectory = Trajectory(task_id=task_id, goal=goal)
@@ -124,10 +130,9 @@ class BaseAgent:
             trajectory = self.reflector.reflect(trajectory)
 
         # Store episode in memory
-        if self.memory:
-            memory_entries = self.memory.store(trajectory)
-            if self.store:
-                self.store.save_memory_entries(self.agent_id, memory_entries)
+        if self.memory is not None:
+            self.memory.store(trajectory)
+            self.save_memory()
 
         if self.store:
             trajectory.metadata["run_id"] = self.store.save_trajectory(
@@ -218,13 +223,43 @@ class BaseAgent:
     # State management
     # ------------------------------------------------------------------
 
+    def load_memory(self, *, preserve_initial: bool = False) -> None:
+        """Reload a persisted snapshot before running; safe for an empty memory."""
+        if self.memory is None or self.store is None:
+            return
+        snapshot = self.store.load_memory_snapshot(self.agent_id)
+        if not preserve_initial or snapshot["revision"] or snapshot["entries"]:
+            self.memory.load(snapshot["entries"], stored_count=snapshot["stored_count"])
+        self._memory_revision = snapshot["revision"]
+
+    def save_memory(self) -> None:
+        """Checkpoint the complete memory, including retrieval access counts.
+
+        Concurrent stale snapshots raise MemoryConflictError; they are never
+        merged blindly. Call load_memory and rerun the task after a conflict.
+        """
+        if self.memory is None or self.store is None:
+            return
+        expected = self._memory_revision if self._memory_revision is not None else 0
+        self._memory_revision = self.store.save_memory_snapshot(
+            self.agent_id, self.memory.dump(), stored_count=self.memory.stored_count,
+            expected_revision=expected,
+        )
+
     def get_state(self) -> AgentState:
-        return self.state
+        state = deepcopy(self.state)
+        if self.memory is not None:
+            state.memory_entries = self.memory.dump()
+            state.metadata["memory_stored_count"] = self.memory.stored_count
+        return state
 
     def load_state(self, state: AgentState) -> None:
-        self.state = state
-        if self.memory and state.memory_entries:
-            self.memory.load(state.memory_entries)
+        self.state = deepcopy(state)
+        self.agent_id = state.agent_id
+        self._memory_revision = None
+        if self.memory is not None:
+            self.memory.load(state.memory_entries,
+                             stored_count=state.metadata.get("memory_stored_count", 0))
 
     def __repr__(self) -> str:
         return f"BaseAgent(id={self.agent_id}, model={self.model})"

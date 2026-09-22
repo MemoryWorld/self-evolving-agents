@@ -53,6 +53,8 @@ class ReflexionReflector(BaseReflector):
     """
 
     def __init__(self, model: Optional[str] = None, max_rounds: int = 3):
+        if max_rounds < 1:
+            raise ValueError("max_rounds must be positive")
         self.model = model or os.getenv("SEA_WEAK_MODEL", "deepseek/deepseek-chat")
         self.max_rounds = max_rounds
 
@@ -74,7 +76,7 @@ class ReflexionReflector(BaseReflector):
                 temperature=0.5,
                 max_tokens=256,
             )
-            reflection = resp.choices[0].message.content.strip()
+            reflection = (resp.choices[0].message.content or "").strip()
             trajectory.metadata["reflection"] = reflection
             logger.info(f"Reflexion: {reflection[:100]}")
         except Exception as e:
@@ -100,7 +102,6 @@ class ReflexionAgent:
         from self_evolving.core.agent import BaseAgent
         self.agent: BaseAgent = agent
         self.reflector = reflector or ReflexionReflector(model=agent.model)
-        self.agent.reflector = self.reflector
 
     def run(
         self,
@@ -109,35 +110,44 @@ class ReflexionAgent:
         task_id: Optional[str] = None,
         progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
     ):
-        from self_evolving.core.environment import Environment
         original_prompt = self.agent.state.system_prompt
+        original_reflector = self.agent.reflector
+        self.agent.reflector = self.reflector
+        attempts = []
+        try:
+            for attempt in range(self.reflector.max_rounds):
+                def on_progress(progress: float, stage: str, detail: dict[str, Any]) -> None:
+                    if progress_callback is None:
+                        return
+                    scaled = ((attempt + (progress / 100.0)) / self.reflector.max_rounds) * 100.0
+                    progress_callback(scaled, "attempt_completed" if stage == "completed" else stage,
+                                      {**detail, "attempt": attempt + 1,
+                                       "max_attempts": self.reflector.max_rounds})
 
-        for attempt in range(self.reflector.max_rounds):
-            def on_progress(progress: float, stage: str, detail: dict[str, Any]) -> None:
-                if progress_callback is None:
-                    return
-                scaled = ((attempt + (progress / 100.0)) / self.reflector.max_rounds) * 100.0
-                progress_callback(
-                    scaled,
-                    stage,
-                    {
-                        **detail,
-                        "attempt": attempt + 1,
-                        "max_attempts": self.reflector.max_rounds,
-                    },
-                )
-
-            trajectory = self.agent.run(env, goal, task_id, progress_callback=on_progress)
-            if trajectory.success:
-                self.agent.state.system_prompt = original_prompt
-                return trajectory
-
-            reflection = trajectory.metadata.get("reflection", "")
-            if reflection:
-                self.agent.state.system_prompt = (
-                    original_prompt + f"\n\n[Reflection from attempt {attempt+1}]: {reflection}"
-                )
-            logger.info(f"Reflexion retry {attempt+2}/{self.reflector.max_rounds}")
-
-        self.agent.state.system_prompt = original_prompt
-        return trajectory
+                trajectory = self.agent.run(env, goal, task_id, progress_callback=on_progress)
+                attempts.append({"attempt": attempt + 1, "success": trajectory.success,
+                                 "num_steps": len(trajectory.steps),
+                                 "total_reward": trajectory.total_reward,
+                                 "run_id": trajectory.metadata.get("run_id"),
+                                 "reflection": trajectory.metadata.get("reflection")})
+                if trajectory.success:
+                    break
+                reflection = trajectory.metadata.get("reflection", "")
+                if reflection:
+                    self.agent.state.system_prompt = (
+                        original_prompt + f"\n\n[Reflection from attempt {attempt+1}]: {reflection}"
+                    )
+                if attempt + 1 < self.reflector.max_rounds:
+                    logger.info(f"Reflexion retry {attempt+2}/{self.reflector.max_rounds}")
+            trajectory.metadata["reflexion_attempts"] = attempts
+            trajectory.metadata["attempt_count"] = len(attempts)
+            trajectory.metadata["total_attempt_steps"] = sum(a["num_steps"] for a in attempts)
+            if self.agent.store is not None and trajectory.metadata.get("run_id"):
+                self.agent.store.update_run_metadata(trajectory.metadata["run_id"], trajectory.metadata)
+            if progress_callback:
+                progress_callback(100.0, "completed", {"attempt_count": len(attempts)})
+            return trajectory
+        finally:
+            # Also restore state if execution, persistence, or callbacks fail.
+            self.agent.state.system_prompt = original_prompt
+            self.agent.reflector = original_reflector

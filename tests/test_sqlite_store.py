@@ -56,3 +56,38 @@ def test_save_and_list_memory(tmp_path):
     assert memories[0]["content"] == "Always answer with the known fact."
     assert memories[0]["success"] is True
     assert memories[0]["embedding"] == [0.1, 0.2, 0.3]
+
+
+def test_legacy_memory_schema_migrates_without_losing_entries(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                 "agent_id TEXT, source_task TEXT, content TEXT, success INTEGER, "
+                 "importance REAL, access_count INTEGER, created_at REAL)")
+    conn.execute("INSERT INTO memories (agent_id, source_task, content, success, importance, "
+                 "access_count, created_at) VALUES ('a', 'old', 'kept', 1, 1.5, 2, 1)")
+    conn.commit()
+    conn.close()
+    store = SQLiteStore(path)
+    snapshot = store.load_memory_snapshot("a")
+    assert snapshot["entries"][0]["content"] == "kept"
+    assert snapshot["entries"][0]["embedding"] == []
+    assert snapshot["stored_count"] == 0  # old schema did not record this counter
+    store.save_memory_snapshot("a", snapshot["entries"], stored_count=1, expected_revision=0)
+    assert store.list_memory("a")[0]["access_count"] == 2
+
+
+def test_connections_close_after_success_and_error(tmp_path):
+    import sqlite3
+    import pytest
+    store = SQLiteStore(str(tmp_path / "connections.db"))
+    with store._connect() as connection:
+        connection.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
+    with pytest.raises(RuntimeError):
+        with store._connect() as failed_connection:
+            raise RuntimeError("simulate failure")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        failed_connection.execute("SELECT 1")

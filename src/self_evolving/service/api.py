@@ -46,6 +46,7 @@ class BenchmarkTaskRequest(BaseModel):
 
 class BenchmarkRequest(BaseModel):
     tasks: list[BenchmarkTaskRequest] = Field(..., min_length=1)
+    tuning_tasks: Optional[list[BenchmarkTaskRequest]] = Field(default=None, min_length=1)
     variants: list[str] = Field(default_factory=lambda: list(BenchmarkRunner.DEFAULT_VARIANTS))
     model: Optional[str] = None
     max_steps: int = Field(default=20, ge=1, le=100)
@@ -75,8 +76,8 @@ def _build_agent(request: QARunRequest, store: SQLiteStore) -> BaseAgent:
 
     if request.use_memory:
         memory = EpisodicMemory()
-        memory.load(store.list_memory(agent.agent_id))
         agent.memory = memory
+        agent.load_memory()
 
     return agent
 
@@ -188,6 +189,9 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 model=request.model,
                 max_steps=request.max_steps,
                 store=app.state.store,
+                tuning_tasks=[BenchmarkTask(task.goal, task.reference_answer)
+                              for task in request.tuning_tasks]
+                if request.tuning_tasks is not None else None,
             )
             summary = runner.run(
                 variants=request.variants,
@@ -197,6 +201,8 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 "session_dir": summary["session_dir"],
                 "task_count": summary["task_count"],
                 "variants": summary["variants"],
+                "evaluation_protocol": summary["evaluation_protocol"],
+                "data_source": summary["data_source"],
             }
 
         job = jobs.submit(

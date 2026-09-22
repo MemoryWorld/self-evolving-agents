@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,11 +50,33 @@ class BenchmarkRunner:
         max_steps: int = 20,
         store: Optional[SQLiteStore] = None,
         agent_id_prefix: str = "benchmark",
+        *,
+        tuning_tasks: Optional[Iterable[BenchmarkTask | tuple[str, str]]] = None,
+        agent_factory: Callable[..., BaseAgent] = BaseAgent,
+        memory_factory: Callable[..., EpisodicMemory] = EpisodicMemory,
+        reflector_factory: Callable[..., ReflexionReflector] = ReflexionReflector,
+        optimizer_factory: Callable[..., OPROOptimizer] = OPROOptimizer,
+        data_source: str = "model_execution",
     ):
         self.tasks = [
             task if isinstance(task, BenchmarkTask) else BenchmarkTask(*task)
             for task in tasks
         ]
+        self.tuning_tasks = [task if isinstance(task, BenchmarkTask) else BenchmarkTask(*task)
+                             for task in tuning_tasks] if tuning_tasks is not None else None
+        # Validate before making model calls or writing artifacts.
+        SimpleQAEnvironment([(task.goal, task.reference_answer) for task in self.tasks])
+        if self.tuning_tasks is not None:
+            SimpleQAEnvironment([(task.goal, task.reference_answer) for task in self.tuning_tasks])
+            tuning_goals = {task.goal.strip().casefold() for task in self.tuning_tasks}
+            if tuning_goals & {task.goal.strip().casefold() for task in self.tasks}:
+                raise ValueError("tuning_tasks and evaluation tasks must have disjoint goals")
+        self.agent_factory = agent_factory
+        self.memory_factory = memory_factory
+        self.reflector_factory = reflector_factory
+        self.optimizer_factory = optimizer_factory
+        self.data_source = data_source
+        self._session_id = ""
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.model = model
@@ -67,6 +90,9 @@ class BenchmarkRunner:
         progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
     ) -> dict:
         variants = variants or list(self.DEFAULT_VARIANTS)
+        unknown = set(variants) - set(self.DEFAULT_VARIANTS)
+        if unknown:
+            raise ValueError(f"Unsupported benchmark variants: {sorted(unknown)}")
         ordered_variants = ["baseline"] + [variant for variant in variants if variant != "baseline"]
         session_dir = self._make_session_dir()
         if progress_callback:
@@ -110,6 +136,13 @@ class BenchmarkRunner:
             "generated_at": datetime.now(UTC).isoformat(),
             "session_dir": str(session_dir),
             "task_count": len(self.tasks),
+            "data_source": self.data_source,
+            "evaluation_protocol": self._evaluation_protocol(),
+            "task_manifest": {
+                "evaluation": [asdict(task) for task in self.tasks],
+                "tuning": [asdict(task) for task in self.tuning_tasks]
+                if self.tuning_tasks is not None else None,
+            },
             "variants": {name: asdict(result) for name, result in results.items()},
         }
         self._write_summary_artifact(session_dir, summary)
@@ -155,7 +188,7 @@ class BenchmarkRunner:
         progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
     ) -> VariantResult:
         agent = self._make_agent("memory")
-        agent.memory = EpisodicMemory()
+        agent.memory = self.memory_factory(model=agent.model)
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
         episodes = self._run_tasks_with_agent(
             agent,
@@ -164,7 +197,10 @@ class BenchmarkRunner:
             progress_callback=progress_callback,
         )
         report = metrics.report()
-        return self._build_result("memory", report, episodes)
+        return self._build_result("memory", report, episodes, metadata={
+            "protocol": "sequential_online_adaptation",
+            "initial_memory": "empty", "memory_updates_during_evaluation": True,
+        })
 
     def _run_reflexion(
         self,
@@ -172,7 +208,7 @@ class BenchmarkRunner:
         progress_callback: Optional[Callable[[float, str, dict[str, Any]], None]] = None,
     ) -> VariantResult:
         agent = self._make_agent("reflexion")
-        wrapped = ReflexionAgent(agent, ReflexionReflector(model=agent.model, max_rounds=2))
+        wrapped = ReflexionAgent(agent, self.reflector_factory(model=agent.model, max_rounds=2))
         metrics = EvolutionMetrics(baseline_success_rate=baseline_success_rate)
         episodes = self._run_tasks_with_runner(
             wrapped,
@@ -181,7 +217,12 @@ class BenchmarkRunner:
             progress_callback=progress_callback,
         )
         report = metrics.report()
-        return self._build_result("reflexion", report, episodes)
+        return self._build_result("reflexion", report, episodes, metadata={
+            "protocol": "same_task_retry", "max_attempts": 2,
+            "mean_steps_scope": "final_attempt_only",
+            "total_attempt_steps": sum(e["metadata"].get("total_attempt_steps", e["num_steps"])
+                                       for e in episodes),
+        })
 
     def _run_prompt_optimization(
         self,
@@ -191,7 +232,9 @@ class BenchmarkRunner:
         initial_prompt = BaseAgent.DEFAULT_SYSTEM
         if progress_callback:
             progress_callback(5.0, "optimizing_prompt", {"variant": "prompt_optimization"})
-        optimizer = OPROOptimizer(model=self.model, max_iterations=3, batch_size=min(4, len(self.tasks)))
+        tuning_tasks = self.tuning_tasks if self.tuning_tasks is not None else self.tasks
+        optimizer = self.optimizer_factory(model=self.model, max_iterations=3,
+                                           batch_size=min(4, len(tuning_tasks)))
         eval_fn = self._make_eval_fn()
         best_prompt = optimizer.optimize(
             initial_prompt=initial_prompt,
@@ -221,6 +264,7 @@ class BenchmarkRunner:
             report,
             episodes,
             metadata={
+                "evaluation_protocol": self._evaluation_protocol(),
                 "best_prompt": best_prompt,
                 "history": [
                     {"prompt": prompt, "score": score}
@@ -230,14 +274,15 @@ class BenchmarkRunner:
         )
 
     def _make_eval_fn(self):
-        tasks = list(self.tasks)
+        tasks = list(self.tuning_tasks if self.tuning_tasks is not None else self.tasks)
 
         def eval_fn(prompt: str) -> float:
-            agent = BaseAgent(model=self.model, max_steps=self.max_steps, system_prompt=prompt)
+            agent = self.agent_factory(model=self.model, max_steps=self.max_steps,
+                                       system_prompt=prompt)
             env = SimpleQAEnvironment([(task.goal, task.reference_answer) for task in tasks])
             successes = 0
             for index, task in enumerate(tasks):
-                trajectory = agent.run(env, goal=task.goal, task_id=f"opro_eval_{index}")
+                trajectory = agent.run(env, goal=task.goal, task_id=f"opro_tuning_{index}")
                 if trajectory.success:
                     successes += 1
             return successes / len(tasks) if tasks else 0.0
@@ -245,11 +290,11 @@ class BenchmarkRunner:
         return eval_fn
 
     def _make_agent(self, variant: str, system_prompt: Optional[str] = None) -> BaseAgent:
-        agent = BaseAgent(
+        agent = self.agent_factory(
             model=self.model,
             max_steps=self.max_steps,
             system_prompt=system_prompt,
-            agent_id=f"{self.agent_id_prefix}-{variant}",
+            agent_id=f"{self.agent_id_prefix}-{self._session_id}-{variant}",
         )
         agent.store = self.store
         return agent
@@ -353,9 +398,21 @@ class BenchmarkRunner:
 
     def _make_session_dir(self) -> Path:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        session_dir = self.output_dir / stamp
-        session_dir.mkdir(parents=True, exist_ok=True)
+        self._session_id = f"{stamp}-{uuid.uuid4().hex}"
+        session_dir = self.output_dir / self._session_id
+        session_dir.mkdir(parents=True, exist_ok=False)
         return session_dir
+
+    def _evaluation_protocol(self) -> dict[str, Any]:
+        return {
+            "prompt_optimization": "heldout" if self.tuning_tasks is not None else "resubstitution",
+            "tuning_task_count": len(self.tuning_tasks) if self.tuning_tasks is not None else len(self.tasks),
+            "evaluation_task_count": len(self.tasks),
+            "overlap_check": "normalized_exact_goal; semantic overlap requires dataset review",
+            "scoring": "case_insensitive_reference_substring_smoke_test",
+            "memory": "sequential_online_adaptation",
+            "reflexion": "same_task_retry_up_to_2_attempts",
+        }
 
     @staticmethod
     def _write_variant_artifact(session_dir: Path, result: VariantResult) -> None:

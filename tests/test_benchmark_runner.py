@@ -5,9 +5,11 @@ import json
 from self_evolving.core.agent import BaseAgent
 from self_evolving.evaluation.benchmark import BenchmarkRunner, BenchmarkTask
 from self_evolving.evolution.prompt.opro import OPROOptimizer
+from self_evolving.evolution.memory.episodic import EpisodicMemory
 
 
 def test_benchmark_runner_writes_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(EpisodicMemory, "_distil", lambda self, trajectory: [trajectory.goal])
     def fake_call_llm(self, messages):
         prompt = messages[0]["content"]
         question = messages[-1]["content"]
