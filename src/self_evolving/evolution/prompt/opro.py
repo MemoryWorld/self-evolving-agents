@@ -59,6 +59,8 @@ New improved prompt:"""
         max_iterations: int = 5,
         batch_size: int = 4,
     ):
+        if max_iterations < 0 or batch_size < 1:
+            raise ValueError("max_iterations must be nonnegative and batch_size positive")
         self.model = model or os.getenv("SEA_MODEL", "deepseek/deepseek-chat")
         self.max_iterations = max_iterations
         self.batch_size = batch_size
@@ -74,6 +76,8 @@ New improved prompt:"""
         Run OPRO optimisation loop.
         Returns the best prompt found.
         """
+        # Each optimization run is independent; old task scores must not leak.
+        self._history = []
         current_prompt = initial_prompt
         current_score = eval_fn(current_prompt)
         self._history.append((current_prompt, current_score))

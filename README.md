@@ -75,6 +75,9 @@ src/self_evolving/
 - Retrieval now uses vector similarity as the primary score.
 - Default setup uses a lightweight local hashing embedder so the project works without extra model downloads.
 - The embedder backend is pluggable, so this can later be swapped to `sentence-transformers` or an external embedding model.
+- Retrieval is `cosine × importance + 0.15 × lexical overlap`, with a linear scan of the retained entries. Access count is tracked, not used as a ranking factor.
+- Empty memory now accumulates its first lesson. Completed episodes checkpoint the **full** memory: summaries, evictions, access counts and the stored-episode count survive reconstruction with the same database and `agent_id`.
+- Retrieval outside `agent.run` requires an explicit `agent.save_memory()` to checkpoint its updated access counts. Failed episodes that raise before checkpoint do not save these changes.
 
 ### Embedders
 - `src/self_evolving/evolution/memory/embedders.py`
@@ -87,7 +90,10 @@ src/self_evolving/
 - Persists:
   - runs
   - steps
-  - episodic memory entries
+- episodic memory entries
+- Memory checkpoints replace one agent's snapshot atomically with an optimistic revision check. Concurrent stale writers fail with `MemoryConflictError` instead of overwriting a newer snapshot; API jobs expose this as `failed` with an error message.
+- `save_memory_entries` and `list_memory` retain their append/query interfaces. Internal snapshot loads preserve oldest-first order; legacy entries migrate automatically, but their unknown historical store count starts at zero.
+- For read-only QA, reload with `agent.load_memory()` and rerun after a conflict. For tools with external side effects, reconcile those effects before retrying. Memory and trajectory writes are separate transactions, not an exactly-once workflow.
 
 ### API service
 - `src/self_evolving/service/api.py`
@@ -109,6 +115,8 @@ src/self_evolving/
 ### Reflection
 - `src/self_evolving/mechanisms/reflection/reflexion.py`
 - Adds post-failure reflection and retry behavior.
+- Retries use a fresh conversation and the previous attempt's reflection. The original prompt and reflector are restored on success, exhaustion, or exceptions.
+- Each attempt is persisted separately; the final run also records attempt IDs/counts and total attempt steps. Reflection text is included as unverified context when distilling a lesson, not treated as verified knowledge or a model-weight update.
 
 ### Reward scoring
 - `src/self_evolving/mechanisms/reward/scorer.py`
@@ -130,6 +138,9 @@ src/self_evolving/
   - reflexion
   - prompt optimization
 - Writes JSON artifacts for each variant plus a session summary.
+- Explicit `tuning_tasks` are used only to score OPRO prompt candidates; the selected prompt is then evaluated on `tasks`. Exact normalized goal overlap is rejected. Without `tuning_tasks`, the protocol is labeled `resubstitution`, never held-out evaluation.
+- Sessions have unique directories and agent IDs, so concurrent sessions do not overwrite artifacts or inherit a previous benchmark's memories. Summaries include the task manifest, protocol and data source.
+- The QA scorer is a case-insensitive reference substring smoke test, not exact-match accuracy. Memory uses sequential online adaptation; Reflexion allows up to two attempts. Final-attempt mean steps and total retry steps are both identified, but reflection/OPRO token cost and latency are **not** measured. These variants do not represent equal-cost quality comparisons.
 
 ### Dashboard
 - `app.py`
@@ -166,8 +177,8 @@ That is not yet enough for:
 
 ### Engineering gaps
 - no container delivery files
-- no CI workflow
-- no background job execution for long-running runs and benchmarks
+- CI runs the offline regression suite and synthetic demo on Windows and Linux
+- background jobs exist, but job state is in memory and is lost on API restart
 
 ### Systems / platform gaps
 - no safe tool sandbox
@@ -211,6 +222,32 @@ cp .env.example .env
 ```
 
 ## Quick Start
+
+For a reproducible offline acceptance run, no API keys or `.env` file are needed:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest tests -q
+python examples/07_generate_demo_data.py --db-path .data/offline-demo.db --benchmark-dir .data/offline-benchmarks
+```
+
+The tests block provider calls and socket connections (except Windows' internal asyncio socket-pair setup). The demo uses explicit deterministic agent/memory/reflection/optimizer implementations, never global patches; its scores are **synthetic fixtures**, not real model results. Package imports use LiteLLM's bundled cost map by default to avoid a metadata download.
+
+For an actual model-backed prompt experiment, provide independent tuning and evaluation tasks:
+
+```python
+from self_evolving.evaluation.benchmark import BenchmarkRunner
+
+runner = BenchmarkRunner(
+    tuning_tasks=[("What is 3 * 7?", "21"), ("Who wrote Hamlet?", "Shakespeare")],
+    tasks=[("What is 8 * 9?", "72"), ("What is the capital of France?", "Paris")],
+    model="your/configured-model",
+)
+summary = runner.run(["baseline", "prompt_optimization"])
+print(summary["evaluation_protocol"])
+```
+
+These tiny examples demonstrate split wiring only. Disjoint question strings do not establish semantic independence; review task families and answer leakage before reporting a real benchmark result. Model-backed examples below require your own provider configuration and may incur API charges.
 
 ```python
 from dotenv import load_dotenv
@@ -263,11 +300,16 @@ curl -X POST http://127.0.0.1:8000/benchmarks/qa \
       {"goal": "What is the capital of France?", "reference_answer": "Paris"},
       {"goal": "What is 12 * 7?", "reference_answer": "84"}
     ],
-    "variants": ["baseline", "memory", "reflexion"]
+    "tuning_tasks": [
+      {"goal": "What is 3 * 7?", "reference_answer": "21"}
+    ],
+    "variants": ["baseline", "memory", "reflexion", "prompt_optimization"]
   }'
 ```
 
 Inspect recent jobs:
+
+Completed benchmark jobs return `evaluation_protocol` and `data_source` alongside their variant results; the dashboard's session summary displays the same fields. If `tuning_tasks` is omitted, OPRO output is explicitly marked `resubstitution`.
 
 ```bash
 curl http://127.0.0.1:8000/jobs
@@ -334,6 +376,8 @@ This populates:
 
 Use it when you want the dashboard to have data immediately without calling a real external model.
 
+The generated runs use model label `offline/deterministic-fixture` and benchmark JSON uses `data_source=synthetic_deterministic_fixture`. No learned-performance claim can be inferred from those values.
+
 ## Next Step
 
 The next practical step after the current background-job control plane is:
@@ -353,6 +397,10 @@ In other words, the next upgrade is turning the current local control plane into
 ```bash
 pytest tests/ -v
 ```
+
+Regression coverage includes empty-memory cold start; app/agent reconstruction and memory injection; summary/eviction/counter restoration; snapshot rollback and stale-writer conflicts; actual Reflexion failure/retry/cleanup and persisted attempt evidence; OPRO tuning/evaluation separation; unique same-second artifacts; and the fully offline demo.
+
+Remaining limits: the default hashing vectors are not a transformer semantic model; embedding model/version migration is not automatic. Memory lacks trusted-source filtering, semantic duplicate detection and tenant authorization. Tool learning is an experimental Python execution path, not a safe sandbox. Background job state remains process-local. No real-model improvement, training result, throughput or token-cost benchmark has been measured by the offline suite.
 
 ## Project Direction
 

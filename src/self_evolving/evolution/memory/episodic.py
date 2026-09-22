@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 import litellm
@@ -62,6 +62,8 @@ Key steps:
         embedder: Optional[BaseEmbedder] = None,
         lexical_weight: float = 0.15,
     ):
+        if max_entries < 1 or summarize_after < 1:
+            raise ValueError("max_entries and summarize_after must be positive")
         self.model = model or os.getenv("SEA_WEAK_MODEL", "deepseek/deepseek-chat")
         self.max_entries = max_entries
         self.summarize_after = summarize_after
@@ -92,7 +94,7 @@ Key steps:
 
     def retrieve(self, query: str, top_k: int = 3) -> list[str]:
         """Return top-k relevant memory entries for a query."""
-        if not self._entries:
+        if not self._entries or top_k <= 0:
             return []
 
         query_embedding = self.embedder.embed(query)
@@ -113,18 +115,28 @@ Key steps:
                 results.append(entry.content)
         return results
 
-    def load(self, raw_entries: list[dict]) -> None:
+    def load(self, raw_entries: list[dict], *, stored_count: int = 0) -> None:
+        """Load entries in oldest-first order, preserving the summary cadence."""
+        if stored_count < 0:
+            raise ValueError("stored_count must be nonnegative")
         self._entries = [MemoryEntry(**entry) for entry in raw_entries]
+        self._stored_count = stored_count
+        self._trim()
 
     def dump(self) -> list[dict]:
-        return [entry.__dict__ for entry in self._entries]
+        return [asdict(entry) for entry in self._entries]
+
+    @property
+    def stored_count(self) -> int:
+        return self._stored_count
 
     def __len__(self) -> int:
         return len(self._entries)
 
     def _distil(self, trajectory: Trajectory) -> list[str]:
         steps_summary = "\n".join(
-            f"  Step {step.step_index}: action={step.action[:120]!r}"
+            f"  Step {step.step_index}: action={step.action[:120]!r}; "
+            f"feedback={str(step.feedback.value)[:120] if step.feedback else ''!r}"
             for step in trajectory.steps[:6]
         )
         outcome = "SUCCESS" if trajectory.success else "FAILURE"
@@ -133,6 +145,9 @@ Key steps:
             outcome=outcome,
             steps=steps_summary,
         )
+        reflection = trajectory.metadata.get("reflection")
+        if reflection:
+            prompt += f"\nPost-attempt reflection (unverified): {str(reflection)[:600]}"
         try:
             resp = litellm.completion(
                 model=self.model,
@@ -144,7 +159,7 @@ Key steps:
             return [
                 line.replace("LESSON:", "").strip()
                 for line in raw.splitlines()
-                if line.strip().startswith("LESSON:")
+                if line.strip().startswith("LESSON:") and line.split("LESSON:", 1)[1].strip()
             ]
         except Exception as exc:
             logger.warning(f"Memory distillation failed: {exc}")
@@ -159,8 +174,19 @@ Key steps:
 
         n_old = max(1, len(self._entries) // 4)
         old_entries = self._entries[:n_old]
-        self._entries = self._entries[n_old:]
         combined = " | ".join(entry.content for entry in old_entries)
+        summary = self._summarize(combined)
+        entry = MemoryEntry(
+            content=f"[Summary] {summary}",
+            source_task="summarized",
+            success=all(item.success for item in old_entries),
+            importance=1.2,
+            access_count=sum(item.access_count for item in old_entries),
+            embedding=self.embedder.embed(summary),
+        )
+        self._entries = [entry] + self._entries[n_old:]
+
+    def _summarize(self, combined: str) -> str:
         summary_prompt = f"Compress these agent lessons into 2 concise sentences:\n{combined}"
 
         try:
@@ -174,21 +200,15 @@ Key steps:
         except Exception:
             summary = combined[:200]
 
-        self._entries.insert(
-            0,
-            MemoryEntry(
-                content=f"[Summary] {summary}",
-                source_task="summarized",
-                success=True,
-                importance=1.2,
-                embedding=self.embedder.embed(summary),
-            ),
-        )
+        return summary
 
     def _trim(self) -> None:
         if len(self._entries) > self.max_entries:
-            self._entries.sort(key=lambda entry: entry.importance, reverse=True)
-            self._entries = self._entries[: self.max_entries]
+            # Select by importance without changing chronological order.
+            keep = set(sorted(range(len(self._entries)),
+                              key=lambda i: self._entries[i].importance,
+                              reverse=True)[:self.max_entries])
+            self._entries = [entry for i, entry in enumerate(self._entries) if i in keep]
 
     @staticmethod
     def _lexical_overlap(query_words: set[str], content: str) -> float:

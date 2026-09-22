@@ -40,7 +40,8 @@ def test_vector_retrieval_prefers_semantic_match():
     assert hits == ["Capital of France is Paris."]
 
 
-def test_store_adds_embedding():
+def test_store_adds_embedding(monkeypatch):
+    monkeypatch.setattr(EpisodicMemory, "_distil", lambda self, trajectory: ["Paris is in France"])
     class Trajectory:
         task_id = "task-1"
         goal = "What is the capital of France?"
